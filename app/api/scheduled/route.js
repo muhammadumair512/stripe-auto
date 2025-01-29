@@ -6,12 +6,11 @@ import axios from "axios";
 import axiosRateLimit from "axios-rate-limit";
 
 export const config = {
-  // Force Node.js runtime for nodemailer, etc.
+  // Force Node.js runtime (needed for nodemailer, etc.)
   runtime: "nodejs",
 };
 
-/** 
- * Environment variables:
+/** Environment variables (set them in .env.local / Vercel Env):
  *   STRIPE_PC, STRIPE_ET, STRIPE_PCP
  *   ADMIN_EMAIL, GMAIL_APP_PASSWORD
  */
@@ -21,15 +20,15 @@ const STRIPE_KEYS = {
   PCP: process.env.STRIPE_PCP,
 };
 
-// Helper to log both to console and to a "logs" array
-function pushLog(logs, message) {
-  console.log(message);
-  logs.push(message);
+// A helper function to push logs to an array & also console.log
+function pushLog(logs, msg) {
+  console.log(msg);
+  logs.push(msg);
 }
 
 /**
- * Download a single PDF in memory. 
- * If it fails after max attempts, returns null (skips).
+ * Download a single PDF in memory. If it fails after max attempts,
+ * returns null (skips that invoice).
  */
 async function downloadPdfInMemory(url, invoiceNumber, http, logs) {
   let attempt = 1;
@@ -45,10 +44,7 @@ async function downloadPdfInMemory(url, invoiceNumber, http, logs) {
       pushLog(logs, `File downloaded in memory for invoice: ${invoiceNumber}`);
       return response.data; // PDF buffer
     } catch (error) {
-      pushLog(
-        logs,
-        `Error downloading ${invoiceNumber} (attempt ${attempt}): ${error}`
-      );
+      pushLog(logs, `Error downloading ${invoiceNumber} (attempt ${attempt}): ${error}`);
       if (attempt === maxAttempts) {
         pushLog(logs, `Skipping invoice ${invoiceNumber} after max attempts`);
         return null;
@@ -56,7 +52,7 @@ async function downloadPdfInMemory(url, invoiceNumber, http, logs) {
     }
     attempt++;
   }
-  return null; // Should never reach here, fallback
+  return null; // theoretically never gets here
 }
 
 /** Merge PDF buffers in memory. Returns null on failure. */
@@ -64,22 +60,19 @@ async function mergePdfs(pdfBuffers, logs) {
   try {
     const mergedPdf = await PDFDocument.create();
     for (const buffer of pdfBuffers) {
-      if (!buffer) continue;
+      if (!buffer) continue; // skip any null
       const tempPdf = await PDFDocument.load(buffer);
-      const copiedPages = await mergedPdf.copyPages(
-        tempPdf,
-        tempPdf.getPageIndices()
-      );
+      const copiedPages = await mergedPdf.copyPages(tempPdf, tempPdf.getPageIndices());
       copiedPages.forEach((page) => mergedPdf.addPage(page));
     }
-    return await mergedPdf.save(); // returns a Uint8Array
+    return await mergedPdf.save(); // returns Uint8Array
   } catch (err) {
     pushLog(logs, `Error merging PDF buffers: ${err}`);
     return null;
   }
 }
 
-/** Create an empty PDF that says "No data available..." */
+/** Create an empty PDF with "No data available for this category." text */
 async function createEmptyPdf(logs) {
   try {
     const pdfDoc = await PDFDocument.create();
@@ -92,7 +85,7 @@ async function createEmptyPdf(logs) {
   }
 }
 
-/** Fetch invoices from Stripe, or return empty arrays if error. */
+/** Fetch invoices from Stripe in [gte, lte], skipping if errors. */
 async function getInvoices(stripe, gte, lte, logs) {
   const paidAndOpenLinks = [];
   const otherStatusLinks = [];
@@ -123,7 +116,8 @@ async function getInvoices(stripe, gte, lte, logs) {
         } else {
           otherStatusLinks.push(pdfLink);
         }
-        pushLog(logs, `Invoice ID: ${invoice.id}`);
+
+        pushLog(logs, `Invoice ID: ${invoice.id} (num: ${invoice.number})`);
       }
 
       if (!invoices.has_more) break;
@@ -137,61 +131,57 @@ async function getInvoices(stripe, gte, lte, logs) {
   return { paidAndOpenLinks, otherStatusLinks };
 }
 
-/** 
- * Our main function to:
- *  1) Calculate the previous complete month
- *  2) Fetch & merge PDFs from Stripe
- *  3) Email them to different recipients
- *  4) Return a NextResponse with logs
+/** Format a date as e.g. "2025-01-28" for logs/emails */
+function formatDate(dateObj) {
+  // Adjust as needed for your preferred format
+  const yyyy = dateObj.getFullYear();
+  const mm = String(dateObj.getMonth() + 1).padStart(2, "0");
+  const dd = String(dateObj.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+/**
+ * The main function to:
+ *  1) Calculate date range: "today - 1 month" to "yesterday"
+ *  2) Fetch & merge PDFs
+ *  3) Email them out
+ *  4) Return logs + success/fail
  */
 async function runMonthlyJob() {
   const logs = [];
+  pushLog(logs, "===== Starting PDF invoice job =====");
 
-  pushLog(logs, "===== Starting monthly PDF email job =====");
-
-  // 1) Determine last month from today's date
   const now = new Date();
   pushLog(logs, `Now: ${now.toISOString()}`);
 
-  const currentMonth = now.getMonth(); // 0-based
-  const currentYear = now.getFullYear();
+  // startDate = "today minus 1 month, same day-of-month"
+  // endDate   = "yesterday"
+  const startDate = new Date(now);
+  startDate.setMonth(startDate.getMonth() - 1); // e.g. if today is Jan 29 => Dec 29
+  startDate.setHours(0, 0, 0, 0);
 
-  // "lastMonthDate" is the 1st day of the previous month
-  const lastMonthDate = new Date(currentYear, currentMonth - 1, 1);
-  pushLog(logs, `Last Month Date: ${lastMonthDate.toISOString()}`);
-
-  const lastMonthYear = lastMonthDate.getFullYear();
-  const lastMonthIndex = lastMonthDate.getMonth();
-
-  // Build start/end date range for last month
-  const startDate = new Date(lastMonthYear, lastMonthIndex, 1);
-  const endDate = new Date(lastMonthYear, lastMonthIndex + 1, 0);
+  const endDate = new Date(now);
+  endDate.setDate(endDate.getDate() - 1); // e.g. if today is Jan 29 => Jan 28
   endDate.setHours(23, 59, 59, 999);
 
-  pushLog(logs, `Start date: ${startDate.toISOString()}`);
-  pushLog(logs, `End date: ${endDate.toISOString()}`);
+  pushLog(logs, `Range Start: ${startDate.toISOString()}`);
+  pushLog(logs, `Range End:   ${endDate.toISOString()}`);
 
   const gte = Math.floor(startDate.getTime() / 1000);
   const lte = Math.floor(endDate.getTime() / 1000);
 
-  const monthNames = [
-    "January","February","March","April","May","June",
-    "July","August","September","October","November","December"
-  ];
-  const monthName = monthNames[lastMonthIndex];
-
-  // 2) Rate-limited axios
-  const http = axiosRateLimit(axios.create(), { maxRPS: 80 });
-
-  // We'll gather two sets of attachments (ET vs. PC/PCP)
+  // We'll keep attachments for ET vs. PC/PCP
   const attachmentsET = [];
   const attachmentsNonET = [];
 
-  // 3) For each Stripe key
+  // Rate-limited axios
+  const http = axiosRateLimit(axios.create(), { maxRPS: 80 });
+
+  // For each Stripe environment key
   for (const configKey of Object.keys(STRIPE_KEYS)) {
-    const keyVal = STRIPE_KEYS[configKey];
-    if (!keyVal) {
-      pushLog(logs, `Missing environment variable for ${configKey}, skipping...`);
+    const stripeKey = STRIPE_KEYS[configKey];
+    if (!stripeKey) {
+      pushLog(logs, `Missing env var for ${configKey}, skipping`);
       continue;
     }
 
@@ -199,57 +189,57 @@ async function runMonthlyJob() {
     let otherStatusLinks = [];
 
     try {
-      const stripe = initStripe(keyVal);
+      const stripe = initStripe(stripeKey);
       const result = await getInvoices(stripe, gte, lte, logs);
       paidAndOpenLinks = result.paidAndOpenLinks;
       otherStatusLinks = result.otherStatusLinks;
     } catch (err) {
-      pushLog(logs, `Error initializing Stripe or retrieving data for ${configKey}: ${err}`);
-      continue; // skip this key
+      pushLog(logs, `Error with Stripe for ${configKey}: ${err}`);
+      continue;
     }
 
-    // Categories
+    // 2 categories: "Paid_And_Open", "Other_Status"
     const categories = [
       { name: "Paid_And_Open", links: paidAndOpenLinks },
       { name: "Other_Status", links: otherStatusLinks },
     ];
 
     for (const cat of categories) {
-      let finalPdfBuffer = null;
+      let finalPdfBuffer;
 
       if (cat.links.length > 0) {
+        // Download each invoice
         const pdfBuffers = [];
         for (const invoice of cat.links) {
-          try {
-            const buff = await downloadPdfInMemory(
-              invoice.invoice_pdf,
-              invoice.invoice_number,
-              http,
-              logs
-            );
-            if (buff) pdfBuffers.push(buff);
-          } catch (err) {
-            pushLog(logs, `Error downloading invoice ${invoice.invoice_number}: ${err}`);
-          }
+          const buffer = await downloadPdfInMemory(
+            invoice.invoice_pdf,
+            invoice.invoice_number,
+            http,
+            logs
+          );
+          if (buffer) pdfBuffers.push(buffer);
         }
-        // Merge them
-        finalPdfBuffer = await mergePdfs(pdfBuffers, logs);
-        if (!finalPdfBuffer) {
-          pushLog(logs, `Merging failed or empty for ${configKey}-${cat.name}, creating fallback PDF...`);
+
+        // Merge
+        if (pdfBuffers.length > 0) {
+          finalPdfBuffer = await mergePdfs(pdfBuffers, logs);
+        } else {
+          pushLog(logs, `No valid PDFs for ${configKey}-${cat.name}, creating empty PDF`);
           finalPdfBuffer = await createEmptyPdf(logs);
         }
       } else {
-        // No links, create empty
+        // No invoices => empty PDF
         finalPdfBuffer = await createEmptyPdf(logs);
       }
 
       if (!finalPdfBuffer) {
-        pushLog(logs, `Could not create final PDF for ${configKey}-${cat.name}, skipping attachment...`);
+        pushLog(logs, `Could not create final PDF for ${configKey}-${cat.name}, skipping`);
         continue;
       }
 
+      const fileName = `${configKey.toUpperCase()}-${cat.name}-${formatDate(startDate)}_to_${formatDate(endDate)}.pdf`;
       const attachment = {
-        filename: `${configKey.toUpperCase()}-${cat.name}-${monthName}-${lastMonthYear}.pdf`,
+        filename: fileName,
         content: Buffer.from(finalPdfBuffer),
       };
 
@@ -261,19 +251,13 @@ async function runMonthlyJob() {
     }
   }
 
-  // 4) Email them out
+  // Now email them out
   const adminEmail = process.env.ADMIN_EMAIL;
   const gmailAppPassword = process.env.GMAIL_APP_PASSWORD;
 
   if (!adminEmail || !gmailAppPassword) {
-    pushLog(logs, "Missing Gmail credentials. Please set ADMIN_EMAIL & GMAIL_APP_PASSWORD.");
-    return {
-      success: false,
-      logs,
-      month: monthName,
-      year: lastMonthYear,
-      message: "Missing email credentials",
-    };
+    pushLog(logs, "Missing email credentials. Not sending anything.");
+    return { success: false, logs, message: "Missing email credentials" };
   }
 
   const transporter = nodemailer.createTransport({
@@ -284,14 +268,15 @@ async function runMonthlyJob() {
     },
   });
 
-  // ET → mumair299792458u@gmail.com
+  // ET => mumair299792458u@gmail.com
   if (attachmentsET.length > 0) {
     try {
       await transporter.sendMail({
         from: adminEmail,
         to: "mumair299792458u@gmail.com",
-        subject: `PDF Invoices for ${monthName} ${lastMonthYear} (ET)`,
-        text: `Attached are the combined PDF invoices (ET) for ${monthName}, ${lastMonthYear}.`,
+        // to: "accounts@esteponatyres.es",
+        subject: `PDF Invoices for ${formatDate(startDate)} to ${formatDate(endDate)} (ET)`,
+        text: `Attached are the combined PDF invoices (ET) covering ${formatDate(startDate)} through ${formatDate(endDate)}.`,
         attachments: attachmentsET,
       });
       pushLog(logs, "ET email sent successfully.");
@@ -302,14 +287,15 @@ async function runMonthlyJob() {
     pushLog(logs, "No ET attachments to send.");
   }
 
-  // PC & PCP → uzairshabbirsab@gmail.com
+  // PC & PCP => uzairshabbirsab@gmail.com
   if (attachmentsNonET.length > 0) {
     try {
       await transporter.sendMail({
         from: adminEmail,
-        to: "uzairshabbirsab@gmail.com",
-        subject: `PDF Invoices for ${monthName} ${lastMonthYear} (PC & PCP)`,
-        text: `Attached are the combined PDF invoices (PC & PCP) for ${monthName}, ${lastMonthYear}.`,
+        to: "mumair299792458u@gmail.com",
+        // to: "accounts@purplegroup.es",
+        subject: `PDF Invoices for ${formatDate(startDate)} to ${formatDate(endDate)} (PC & PCP)`,
+        text: `Attached are the combined PDF invoices (PC & PCP) covering ${formatDate(startDate)} through ${formatDate(endDate)}.`,
         attachments: attachmentsNonET,
       });
       pushLog(logs, "PC & PCP email sent successfully.");
@@ -320,48 +306,28 @@ async function runMonthlyJob() {
     pushLog(logs, "No PC/PCP attachments to send.");
   }
 
-  pushLog(logs, "===== Monthly PDF email job completed. =====");
-  return {
-    success: true,
-    logs,
-    month: monthName,
-    year: lastMonthYear,
-  };
+  pushLog(logs, "===== Invoice job completed. =====");
+  return { success: true, logs };
 }
 
-/**
- * GET request handler:
- *   1) Runs the job to fetch & merge last month's invoices
- *   2) Returns JSON with success/failure, logs, and which month/year was processed.
- */
+/** GET: fetch/merge last-month invoices, return JSON with logs. */
 export async function GET() {
   try {
     const result = await runMonthlyJob();
-    // Return the result as JSON
     return NextResponse.json(result, { status: 200 });
   } catch (err) {
     console.error("Top-level error in monthly job:", err);
-    return NextResponse.json(
-      { success: false, message: err.message },
-      { status: 500 }
-    );
+    return NextResponse.json({ success: false, message: err.message }, { status: 500 });
   }
 }
 
-/**
- * We also export a default function for older Vercel "scheduled" usage,
- * but in practice, the GET above is what you call.
- */
+/** default: same logic if triggered by some scheduling */
 export default async function handler() {
-  // The same logic if your route is triggered by a scheduled call
   try {
     const result = await runMonthlyJob();
     return NextResponse.json(result, { status: 200 });
   } catch (err) {
     console.error("Top-level error in monthly job (default):", err);
-    return NextResponse.json(
-      { success: false, message: err.message },
-      { status: 500 }
-    );
+    return NextResponse.json({ success: false, message: err.message }, { status: 500 });
   }
 }
