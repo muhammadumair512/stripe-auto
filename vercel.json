@@ -1,12 +1,14 @@
 {
-    "version": 2,
     "functions": {
       "app/api/scheduled/route.js": {
         "runtime": "nodejs18.x"
       }
     },
-    "cron": {
-      "app/api/scheduled/route.js": "0 14 29 * *"
-    }
+    "cron": [
+      {
+        "path": "/api/scheduled",
+        "schedule": "0 14 29 * *"
+      }
+    ]
   }
   
