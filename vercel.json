@@ -3,12 +3,6 @@
       "app/api/scheduled/route.js": {
         "runtime": "nodejs18.x"
       }
-    },
-    "cron": [
-      {
-        "path": "/api/scheduled",
-        "schedule": "0 14 29 * *"
-      }
-    ]
+    }
   }
   
