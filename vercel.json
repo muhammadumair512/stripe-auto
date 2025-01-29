@@ -1,8 +1,4 @@
 {
-    "functions": {
-      "app/api/scheduled/route.js": {
-        "runtime": "nodejs18.x"
-      }
-    }
+    
   }
   
