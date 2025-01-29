@@ -3,7 +3,7 @@ name: Monthly Invoice Automation
 on:
   schedule:
     # Runs at 00:00 on the 2nd day of each month
-    - cron: "40 14 29 * *"
+    - cron: "47 14 29 * *"
 
 jobs:
   call-vercel:
